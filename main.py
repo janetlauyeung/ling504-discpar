@@ -1,42 +1,54 @@
 from sklearn.compose import make_column_transformer, ColumnTransformer
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, OrdinalEncoder
+from sklearn.metrics import classification_report
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer
 from sklearn.base import BaseEstimator, TransformerMixin
 import pandas as pd, numpy as np
 from sklearn.model_selection import train_test_split, StratifiedShuffleSplit
+from xgboost import XGBClassifier
+from sklearn.svm import LinearSVC
 from clean import clean
 from augment import augment
+from trial import Trial
 
+################################################################################
+# Begin global state
+################################################################################
+
+facts = pd.read_csv("rst_transitions.tab", sep="\t", quoting=3)
+
+# some categories of columns
 lex_feats = ["Top2-Stack", "Top1Span", "First-Queue"]
 categorical_features = ['Top12-StackXML', 'Stack-QueueSType', "Stack", "genre", "Stack-QueueSameSent",
                         "Top12-StackSameSent",
                         'Top12-StackSameSent', 'Stack-QueueXML', 'Top12-StackSType',
                         "Top12-StackDir", "Stack-QueueDir", "First-QueueEduFunc", "Top1SpanEduFunc"]
-numeric_features = ['First-QueueDist-To-Begin', 'Top2-StackLength-EDU', 'Top1-StackLength-EDU', 'Top1-StacknEDUs']
+numeric_features = ['First-QueueDist-To-Begin', 'Top2-StackLength-EDU', 'Top1-StackLength-EDU'] #'Top1-StacknEDUs']
 scale_features = ['Top2-StackDist-To-End', 'First-Queue-Len']
 text_features = ['First-Queue', 'Top1Span', 'Top2-Stack']
 
-# This is effectively a 'do nothing transformer', we may need it below
-class IdentityTransformer(BaseEstimator, TransformerMixin):
-    def __init__(self):
-        pass
-
-    def fit(self, input_array, y=None):
-        return self
-
-    def transform(self, input_array, y=None):
-        return input_array * 1
-
+# clean and augment data
+data = facts.copy(deep=True)
+data = clean(data)
+data = augment(data)
+data = data.sample(frac=1, random_state=42)
 def split(data):
     splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.2, random_state=42)
     for train_idx, test_idx in splitter.split(data, data["label"]):
         train = data.loc[train_idx]
         test = data.loc[test_idx]
     return train, test
+train, test = split(data)
 
-def make_preprocessor(data, one_hot=False, ordinal=False):
+################################################################################
+# Feature engineering
+################################################################################
+# This is effectively a 'do nothing transformer', we may need it below
+nop_transformer = FunctionTransformer(lambda x: x)
+
+def make_transformer(data, one_hot=False, ordinal=False):
     # Store a vocabulary per feature
     vocabs = {}
     lex_vectorizers = {}
@@ -55,7 +67,7 @@ def make_preprocessor(data, one_hot=False, ordinal=False):
         print(vocabs[feat][:100])
 
     numeric_transformer = Pipeline(steps=[
-        ('identity', IdentityTransformer())
+        ('identity', nop_transformer)
     ])
 
     scale_transformer = Pipeline(steps=[
@@ -82,6 +94,46 @@ def make_preprocessor(data, one_hot=False, ordinal=False):
         ]
     )
 
+################################################################################
+# Trials
+################################################################################
+
+# A trial is an object that conceptually means "a model run with a featureset"
+# You hand it a ColumnTransformer in its constructor, and in return, it will:
+# - evaluate on test for you
+# - store the model in trial.model
+# - store the preds in trial.preds
+# - store the transformer in trial.transformer
+# and more!
+
+class XGBTrial(Trial):
+    def __init__(self, transformer, use_test=False, **kwargs):
+        self.method = "decision_function"
+        super().__init__(**kwargs)
+
+        eval_rows = test if use_test else train
+
+        X = transformer.fit_transform(train)
+        y = train["label"]
+
+        model = XGBClassifier(
+            nthread=-1
+        )
+        model.fit(X, y)
+
+        # predict
+        X_eval = transformer.transform(eval_rows)
+        preds = model.predict(X_eval)
+
+        # hold on to refs in case we want them later
+        self.X = X
+        self.y = y
+        self.model = model
+        self.preds = preds
+        self.transformer = transformer
+
+        # populate score attributes
+        self._perf(eval_rows["label"], preds)
 
 def get_column_names_from_ColumnTransformer(column_transformer):
     col_name = []
@@ -105,44 +157,21 @@ def get_column_names_from_ColumnTransformer(column_transformer):
     return col_name
 
 
-def main():
-    facts = pd.read_csv("rst_transitions.tab", sep="\t", quoting=3)
-
-    # clean and augment data
-    data = facts.copy(deep=True)
-    data = clean(data)
-    data = augment(data)
-    data = data.sample(frac=1, random_state=42)
-
-    train, test = split(data)
-
+if __name__ == '__main__':
     # We have this many examples, stratified by number of children
+    print("Note: run this file with -i (e.g.: `python -i main.py`) to drop into a Python REPL")
     print("Train, test sizes:")
     print(train.shape, test.shape)
 
-    oh_preprocessor = make_preprocessor(train, one_hot=True)
-    ord_preprocessor = make_preprocessor(train, ordinal=True)
+    oh_transformer = make_transformer(train, one_hot=True)
+    ord_transformer = make_transformer(train, ordinal=True)
 
-    encoded_oh = oh_preprocessor.fit_transform(train)
-    encoded_ord = ord_preprocessor.fit_transform(train)
-
-    # Learn
-    from sklearn.svm import LinearSVC
-    clf = LinearSVC()
-    print("Fitting...")
-    clf.fit(encoded_ord, train["label"])
-    from sklearn.metrics import classification_report
+    print("Beginning XGB fitting...")
+    xgb_trial = XGBTrial(ord_transformer, use_test=True)
+    print(xgb_trial)
     print("Fitting done. Predicting...")
 
-    X_test = ord_preprocessor.transform(test)
-    preds = clf.predict(X_test)
-    print(classification_report(test["label"], preds))
+    print(classification_report(test["label"], xgb_trial.preds))
 
-    # Useful function for retrieving feature names
-
-    names = get_column_names_from_ColumnTransformer(ord_preprocessor)
+    names = get_column_names_from_ColumnTransformer(ord_transformer)
     print(names[:50])
-
-
-if __name__ == '__main__':
-    main()
