@@ -9,7 +9,7 @@ def coerce_numerical(data):
         'Top2-StackDist-To-End',
         'Top2-StackLength-EDU',
         'Top1-StackLength-EDU',
-        'Top1-StacknEDUs'
+        'Top1-StacknEDUs',
     ]
 
     for col in num_with_missing:
@@ -19,7 +19,7 @@ def coerce_numerical(data):
 def suppress_rare(data):
     # Depending on the approach you take you may want to handle rare values
     # which might be absent from test
-    for col in ['Top12-StackSType', 'Stack-QueueSType']:
+    for col in ['Top12-StackSType', 'Stack-QueueSType', 'SeqPredFirstSpan', 'SeqPredTop1Span']:
         data.loc[data[col].value_counts()[data[col]].values < 20, col] = "_"
 
 
